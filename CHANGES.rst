@@ -2,11 +2,18 @@
 Cython Changelog
 ================
 
-Latest development
-===================
+0.24 (2016-04-04)
+=================
 
 Features added
 --------------
+
+* PEP 498: Literal String Formatting (f-strings).
+  Original patch by Jelle Zijlstra.
+  https://www.python.org/dev/peps/pep-0498/
+
+* PEP 515: Underscores as visual separators in number literals.
+  https://www.python.org/dev/peps/pep-0515/
 
 * Parser was adapted to some minor syntax changes in Py3.6, e.g.
   https://bugs.python.org/issue9232
@@ -27,6 +34,8 @@ Features added
 
 * Exception type tests have slightly lower overhead.
   This fixes ticket 868.
+
+* @property syntax fully supported in cdef classes, old syntax deprecated.
 
 * C++ classes can now be declared with default template parameters.
 
@@ -57,18 +66,28 @@ Bugs fixed
 * Iteration over ``dict(...).items()`` failed to get optimised when dict
   arguments included keyword arguments.
 
-Other changes
--------------
+* cProfile now correctly profiles cpdef functions and methods.
 
 
-0.23.5 (2015-xx-yy)
+0.23.5 (2016-03-26)
 ===================
 
-Bugs fixed
-----------
+* Compile errors and warnings in integer type conversion code.  This fixes
+  ticket 877.  Patches by Christian Neukirchen, Nikolaus Rath, Ian Henriksen.
+
+* Reference leak when "*args" argument was reassigned in closures.
+
+* Truth-testing Unicode strings could waste time and memory in Py3.3+.
+
+* Return values of async functions could be ignored and replaced by ``None``.
+
+* Compiler crash in CPython 3.6.
 
 * Fix prange() to behave identically to range().  The end condition was
   miscalculated when the range was not exactly divisible by the step.
+
+* Optimised ``all(genexpr)``/``any(genexpr)`` calls could warn about unused
+  code.  This fixes ticket 876.
 
 
 0.23.4 (2015-10-10)

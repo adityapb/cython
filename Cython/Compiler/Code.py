@@ -40,7 +40,7 @@ try:
 except ImportError:
     from builtins import str as basestring
 
-KEYWORDS_MUST_BE_BYTES = sys.version_info < (2,7)
+KEYWORDS_MUST_BE_BYTES = sys.version_info < (2, 7)
 
 
 non_portable_builtins_map = {
@@ -137,16 +137,19 @@ class UtilityCodeBase(object):
 
         if type == 'proto':
             utility[0] = code
+        elif type.startswith('proto.'):
+            utility[0] = code
+            utility[1] = type[6:]
         elif type == 'impl':
-            utility[1] = code
+            utility[2] = code
         else:
-            all_tags = utility[2]
+            all_tags = utility[3]
             if KEYWORDS_MUST_BE_BYTES:
                 type = type.encode('ASCII')
             all_tags[type] = code
 
         if tags:
-            all_tags = utility[2]
+            all_tags = utility[3]
             for name, values in tags.items():
                 if KEYWORDS_MUST_BE_BYTES:
                     name = name.encode('ASCII')
@@ -172,12 +175,12 @@ class UtilityCodeBase(object):
             (r'^%(C)s{5,30}\s*(?P<name>(?:\w|\.)+)\s*%(C)s{5,30}|'
              r'^%(C)s+@(?P<tag>\w+)\s*:\s*(?P<value>(?:\w|[.:])+)') %
             {'C': comment}).match
-        match_type = re.compile('(.+)[.](proto|impl|init|cleanup)$').match
+        match_type = re.compile('(.+)[.](proto(?:[.]\S+)?|impl|init|cleanup)$').match
 
         with closing(Utils.open_source_file(filename, encoding='UTF-8')) as f:
             all_lines = f.readlines()
 
-        utilities = defaultdict(lambda: [None, None, {}])
+        utilities = defaultdict(lambda: [None, None, None, {}])
         lines = []
         tags = defaultdict(set)
         utility = type = None
@@ -251,7 +254,7 @@ class UtilityCodeBase(object):
             from_file = files[0]
 
         utilities = cls.load_utilities_from_file(from_file)
-        proto, impl, tags = utilities[util_code_name]
+        proto, proto_block, impl, tags = utilities[util_code_name]
 
         if tags:
             orig_kwargs = kwargs.copy()
@@ -275,6 +278,8 @@ class UtilityCodeBase(object):
 
         if proto is not None:
             kwargs['proto'] = proto
+        if proto_block is not None:
+            kwargs['proto_block'] = proto_block
         if impl is not None:
             kwargs['impl'] = impl
 
@@ -392,12 +397,12 @@ class UtilityCode(UtilityCodeBase):
                 requires = [r.specialize(data) for r in self.requires]
 
             s = self._cache[key] = UtilityCode(
-                    self.none_or_sub(self.proto, data),
-                    self.none_or_sub(self.impl, data),
-                    self.none_or_sub(self.init, data),
-                    self.none_or_sub(self.cleanup, data),
-                    requires,
-                    self.proto_block)
+                self.none_or_sub(self.proto, data),
+                self.none_or_sub(self.impl, data),
+                self.none_or_sub(self.init, data),
+                self.none_or_sub(self.cleanup, data),
+                requires,
+                self.proto_block)
 
             self.specialize_list.append(s)
             return s
@@ -472,19 +477,21 @@ class UtilityCode(UtilityCodeBase):
             for dependency in self.requires:
                 output.use_utility_code(dependency)
         if self.proto:
-            output[self.proto_block].put_or_include(
-                self.format_code(self.proto),
-                '%s_proto' % self.name)
+            writer = output[self.proto_block]
+            writer.putln("/* %s.proto */" % self.name)
+            writer.put_or_include(
+                self.format_code(self.proto), '%s_proto' % self.name)
         if self.impl:
             impl = self.format_code(self.wrap_c_strings(self.impl))
             is_specialised1, impl = self.inject_string_constants(impl, output)
             is_specialised2, impl = self.inject_unbound_methods(impl, output)
+            writer = output['utility_code_def']
+            writer.putln("/* %s */" % self.name)
             if not (is_specialised1 or is_specialised2):
                 # no module specific adaptations => can be reused
-                output['utility_code_def'].put_or_include(
-                    impl, '%s_impl' % self.name)
+                writer.put_or_include(impl, '%s_impl' % self.name)
             else:
-                output['utility_code_def'].put(impl)
+                writer.put(impl)
         if self.init:
             writer = output['init_globals']
             writer.putln("/* %s.init */" % self.name)
@@ -496,6 +503,7 @@ class UtilityCode(UtilityCodeBase):
             writer.putln()
         if self.cleanup and Options.generate_cleanup_code:
             writer = output['cleanup_globals']
+            writer.putln("/* %s.cleanup */" % self.name)
             if isinstance(self.cleanup, basestring):
                 writer.put_or_include(
                     self.format_code(self.cleanup),
@@ -711,13 +719,14 @@ class FunctionState(object):
             manage_ref = False
 
         freelist = self.temps_free.get((type, manage_ref))
-        if freelist is not None and len(freelist) > 0:
-            result = freelist.pop()
+        if freelist is not None and freelist[0]:
+            result = freelist[0].pop()
+            freelist[1].remove(result)
         else:
             while True:
                 self.temp_counter += 1
                 result = "%s%d" % (Naming.codewriter_temp_prefix, self.temp_counter)
-                if not result in self.names_taken: break
+                if result not in self.names_taken: break
             self.temps_allocated.append((result, type, manage_ref, static))
         self.temps_used_type[result] = (type, manage_ref)
         if DebugFlags.debug_temp_code_comments:
@@ -736,11 +745,12 @@ class FunctionState(object):
         type, manage_ref = self.temps_used_type[name]
         freelist = self.temps_free.get((type, manage_ref))
         if freelist is None:
-            freelist = []
+            freelist = ([], set())  # keep order in list and make lookups in set fast
             self.temps_free[(type, manage_ref)] = freelist
-        if name in freelist:
+        if name in freelist[1]:
             raise RuntimeError("Temp %s freed twice!" % name)
-        freelist.append(name)
+        freelist[0].append(name)
+        freelist[1].add(name)
         if DebugFlags.debug_temp_code_comments:
             self.owner.putln("/* %s released */" % name)
 
@@ -751,7 +761,7 @@ class FunctionState(object):
         used = []
         for name, type, manage_ref, static in self.temps_allocated:
             freelist = self.temps_free.get((type, manage_ref))
-            if freelist is None or name not in freelist:
+            if freelist is None or name not in freelist[1]:
                 used.append((name, type, manage_ref and type.is_pyobject))
         return used
 
@@ -768,8 +778,8 @@ class FunctionState(object):
         """Return a list of (cname, type) tuples of refcount-managed Python objects.
         """
         return [(cname, type)
-                    for cname, type, manage_ref, static in self.temps_allocated
-                        if manage_ref]
+                for cname, type, manage_ref, static in self.temps_allocated
+                if manage_ref]
 
     def all_free_managed_temps(self):
         """Return a list of (cname, type) tuples of refcount-managed Python
@@ -779,7 +789,7 @@ class FunctionState(object):
         """
         return [(cname, type)
                 for (type, manage_ref), freelist in self.temps_free.items() if manage_ref
-                for cname in freelist]
+                for cname in freelist[0]]
 
     def start_collecting_temps(self):
         """
@@ -844,7 +854,7 @@ class StringConst(object):
 
     def add_py_version(self, version):
         if not version:
-            self.py_versions = [2,3]
+            self.py_versions = [2, 3]
         elif version not in self.py_versions:
             self.py_versions.append(version)
 
@@ -1275,8 +1285,8 @@ class GlobalState(object):
         self.generate_object_constant_decls()
 
     def generate_object_constant_decls(self):
-        consts = [ (len(c.cname), c.cname, c)
-                   for c in self.py_constants ]
+        consts = [(len(c.cname), c.cname, c)
+                  for c in self.py_constants]
         consts.sort()
         decls_writer = self.parts['decls']
         for _, cname, c in consts:
@@ -1340,12 +1350,11 @@ class GlobalState(object):
             py_strings.sort()
             w = self.parts['pystring_table']
             w.putln("")
-            w.putln("static __Pyx_StringTabEntry %s[] = {" %
-                                      Naming.stringtab_cname)
+            w.putln("static __Pyx_StringTabEntry %s[] = {" % Naming.stringtab_cname)
             for c_cname, _, py_string in py_strings:
                 if not py_string.is_str or not py_string.encoding or \
-                       py_string.encoding in ('ASCII', 'USASCII', 'US-ASCII',
-                                              'UTF8', 'UTF-8'):
+                        py_string.encoding in ('ASCII', 'USASCII', 'US-ASCII',
+                                               'UTF8', 'UTF-8'):
                     encoding = '0'
                 else:
                     encoding = '"%s"' % py_string.encoding.lower()
@@ -1354,8 +1363,7 @@ class GlobalState(object):
                     "static PyObject *%s;" % py_string.cname)
                 if py_string.py3str_cstring:
                     w.putln("#if PY_MAJOR_VERSION >= 3")
-                    w.putln(
-                        "{&%s, %s, sizeof(%s), %s, %d, %d, %d}," % (
+                    w.putln("{&%s, %s, sizeof(%s), %s, %d, %d, %d}," % (
                         py_string.cname,
                         py_string.py3str_cstring.cname,
                         py_string.py3str_cstring.cname,
@@ -1363,8 +1371,7 @@ class GlobalState(object):
                         py_string.intern
                         ))
                     w.putln("#else")
-                w.putln(
-                    "{&%s, %s, sizeof(%s), %s, %d, %d, %d}," % (
+                w.putln("{&%s, %s, sizeof(%s), %s, %d, %d, %d}," % (
                     py_string.cname,
                     c_cname,
                     c_cname,
@@ -2351,7 +2358,7 @@ class ClosureTempAllocator(object):
             self.temps_free[type] = list(cnames)
 
     def allocate_temp(self, type):
-        if not type in self.temps_allocated:
+        if type not in self.temps_allocated:
             self.temps_allocated[type] = []
             self.temps_free[type] = []
         elif self.temps_free[type]:

@@ -53,19 +53,22 @@ pyx_reserved_words = py_reserved_words + [
 
 class Method(object):
 
-    def __init__(self, name):
+    def __init__(self, name, **kwargs):
         self.name = name
+        self.kwargs = kwargs or None
         self.__name__ = name  # for Plex tracing
 
     def __call__(self, stream, text):
-        return getattr(stream, self.name)(text)
+        method = getattr(stream, self.name)
+        # self.kwargs is almost always unused => avoid call overhead
+        return method(text, **self.kwargs) if self.kwargs is not None else method(text)
 
 
 #------------------------------------------------------------------
 
 class CompileTimeScope(object):
 
-    def __init__(self, outer = None):
+    def __init__(self, outer=None):
         self.entries = {}
         self.outer = outer
 
@@ -94,8 +97,7 @@ class CompileTimeScope(object):
 
 def initial_compile_time_env():
     benv = CompileTimeScope()
-    names = ('UNAME_SYSNAME', 'UNAME_NODENAME', 'UNAME_RELEASE',
-        'UNAME_VERSION', 'UNAME_MACHINE')
+    names = ('UNAME_SYSNAME', 'UNAME_NODENAME', 'UNAME_RELEASE', 'UNAME_VERSION', 'UNAME_MACHINE')
     for name, value in zip(names, platform.uname()):
         benv.declare(name, value)
     try:
@@ -269,8 +271,8 @@ class StringSourceDescriptor(SourceDescriptor):
         if not encoding:
             return self.codelines
         else:
-            return [ line.encode(encoding, error_handling).decode(encoding)
-                     for line in self.codelines ]
+            return [line.encode(encoding, error_handling).decode(encoding)
+                    for line in self.codelines]
 
     def get_description(self):
         return self.name
@@ -339,6 +341,9 @@ class PyrexScanner(Scanner):
     def commentline(self, text):
         if self.parse_comments:
             self.produce('commentline', text)
+
+    def strip_underscores(self, text, symbol):
+        self.produce(symbol, text.replace('_', ''))
 
     def current_level(self):
         return self.indentation_stack[-1]
@@ -481,7 +486,7 @@ class PyrexScanner(Scanner):
         else:
             self.expected(what, message)
 
-    def expected(self, what, message = None):
+    def expected(self, what, message=None):
         if message:
             self.error(message)
         else:

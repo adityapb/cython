@@ -93,8 +93,13 @@
   #define __Pyx_PyUnicode_KIND(u)         PyUnicode_KIND(u)
   #define __Pyx_PyUnicode_DATA(u)         PyUnicode_DATA(u)
   #define __Pyx_PyUnicode_READ(k, d, i)   PyUnicode_READ(k, d, i)
+  #define __Pyx_PyUnicode_WRITE(k, d, i, ch)  PyUnicode_WRITE(k, d, i, ch)
+  #define __Pyx_PyUnicode_IS_TRUE(u)      (0 != (likely(PyUnicode_IS_READY(u)) ? PyUnicode_GET_LENGTH(u) : PyUnicode_GET_SIZE(u)))
 #else
   #define CYTHON_PEP393_ENABLED 0
+  #define PyUnicode_1BYTE_KIND  1
+  #define PyUnicode_2BYTE_KIND  2
+  #define PyUnicode_4BYTE_KIND  4
   #define __Pyx_PyUnicode_READY(op)       (0)
   #define __Pyx_PyUnicode_GET_LENGTH(u)   PyUnicode_GET_SIZE(u)
   #define __Pyx_PyUnicode_READ_CHAR(u, i) ((Py_UCS4)(PyUnicode_AS_UNICODE(u)[i]))
@@ -102,6 +107,8 @@
   #define __Pyx_PyUnicode_DATA(u)         ((void*)PyUnicode_AS_UNICODE(u))
   /* (void)(k) => avoid unused variable warning due to macro: */
   #define __Pyx_PyUnicode_READ(k, d, i)   ((void)(k), (Py_UCS4)(((Py_UNICODE*)d)[i]))
+  #define __Pyx_PyUnicode_WRITE(k, d, i, ch)  (((void)(k)), ((Py_UNICODE*)d)[i] = ch)
+  #define __Pyx_PyUnicode_IS_TRUE(u)      (0 != PyUnicode_GET_SIZE(u))
 #endif
 
 #if CYTHON_COMPILING_IN_PYPY
@@ -117,6 +124,20 @@
   #define PyUnicode_Contains(u, s)  PySequence_Contains(u, s)
 #endif
 
+#if CYTHON_COMPILING_IN_PYPY && !defined(PyByteArray_Check)
+  #define PyByteArray_Check(obj)  PyObject_TypeCheck(obj, &PyByteArray_Type)
+#endif
+
+#if CYTHON_COMPILING_IN_PYPY && !defined(PyObject_Format)
+  #define PyObject_Format(obj, fmt)  PyObject_CallMethod(obj, "__format__", "O", fmt)
+#endif
+
+#if CYTHON_COMPILING_IN_PYPY && !defined(PyObject_Malloc)
+  #define PyObject_Malloc(s)   PyMem_Malloc(s)
+  #define PyObject_Free(p)     PyMem_Free(p)
+  #define PyObject_Realloc(p)  PyMem_Realloc(p)
+#endif
+
 #define __Pyx_PyString_FormatSafe(a, b)   ((unlikely((a) == Py_None)) ? PyNumber_Remainder(a, b) : __Pyx_PyString_Format(a, b))
 #define __Pyx_PyUnicode_FormatSafe(a, b)  ((unlikely((a) == Py_None)) ? PyNumber_Remainder(a, b) : PyUnicode_Format(a, b))
 
@@ -124,6 +145,10 @@
   #define __Pyx_PyString_Format(a, b)  PyUnicode_Format(a, b)
 #else
   #define __Pyx_PyString_Format(a, b)  PyString_Format(a, b)
+#endif
+
+#if PY_MAJOR_VERSION < 3 && !defined(PyObject_ASCII)
+  #define PyObject_ASCII(o)            PyObject_Repr(o)
 #endif
 
 #if PY_MAJOR_VERSION >= 3
@@ -335,8 +360,8 @@ PyEval_InitThreads();
 /////////////// CodeObjectCache.proto ///////////////
 
 typedef struct {
-    int code_line;
     PyCodeObject* code_object;
+    int code_line;
 } __Pyx_CodeObjectCacheEntry;
 
 struct __Pyx_CodeObjectCache {

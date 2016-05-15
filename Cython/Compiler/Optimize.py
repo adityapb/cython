@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import sys
 import copy
 import codecs
+import itertools
 
 from . import TypeSlots
 from .ExprNodes import not_a_constant
@@ -1519,40 +1520,32 @@ class EarlyReplaceBuiltinCalls(Visitor.EnvTransform):
     def _handle_simple_function_all(self, node, pos_args):
         """Transform
 
-        _result = all(x for L in LL for x in L)
+        _result = all(p(x) for L in LL for x in L)
 
         into
 
         for L in LL:
             for x in L:
-                if not x:
-                    _result = False
-                    break
-            else:
-                continue
-            break
+                if not p(x):
+                    return False
         else:
-            _result = True
+            return True
         """
         return self._transform_any_all(node, pos_args, False)
 
     def _handle_simple_function_any(self, node, pos_args):
         """Transform
 
-        _result = any(x for L in LL for x in L)
+        _result = any(p(x) for L in LL for x in L)
 
         into
 
         for L in LL:
             for x in L:
-                if x:
-                    _result = True
-                    break
-            else:
-                continue
-            break
+                if p(x):
+                    return True
         else:
-            _result = False
+            return False
         """
         return self._transform_any_all(node, pos_args, True)
 
@@ -1583,15 +1576,6 @@ class EarlyReplaceBuiltinCalls(Visitor.EnvTransform):
                         value=ExprNodes.BoolNode(yield_expression.pos, value=is_any, constant_result=is_any))
                 )]
         )
-        loop = loop_node
-        while isinstance(loop.body, Nodes.LoopNode):
-            next_loop = loop.body
-            loop.body = Nodes.StatListNode(loop.body.pos, stats=[
-                loop.body,
-                Nodes.BreakStatNode(yield_expression.pos)
-            ])
-            next_loop.else_clause = Nodes.ContinueStatNode(yield_expression.pos)
-            loop = next_loop
         loop_node.else_clause = Nodes.ReturnStatNode(
             node.pos,
             value=ExprNodes.BoolNode(yield_expression.pos, value=not is_any, constant_result=not is_any))
@@ -3950,6 +3934,47 @@ class ConstantFolding(Visitor.VisitorTransform, SkipDeclarations):
             else:
                 sequence_node.mult_factor = factor
         return sequence_node
+
+    def visit_FormattedValueNode(self, node):
+        self.visitchildren(node)
+        if isinstance(node.format_spec, ExprNodes.UnicodeNode) and not node.format_spec.value:
+            node.format_spec = None
+        if node.format_spec is None and node.conversion_char is None and isinstance(node.value, ExprNodes.UnicodeNode):
+            return node.value
+        return node
+
+    def visit_JoinedStrNode(self, node):
+        """
+        Clean up after the parser by discarding empty Unicode strings and merging
+        substring sequences.  Empty or single-value join lists are not uncommon
+        because f-string format specs are always parsed into JoinedStrNodes.
+        """
+        self.visitchildren(node)
+        unicode_node = ExprNodes.UnicodeNode
+
+        values = []
+        for is_unode_group, substrings in itertools.groupby(node.values, lambda v: isinstance(v, unicode_node)):
+            if is_unode_group:
+                substrings = list(substrings)
+                unode = substrings[0]
+                if len(substrings) > 1:
+                    unode.value = EncodedString(u''.join(value.value for value in substrings))
+                # ignore empty Unicode strings
+                if unode.value:
+                    values.append(unode)
+            else:
+                values.extend(substrings)
+
+        if not values:
+            node = ExprNodes.UnicodeNode(node.pos, value=EncodedString(''))
+        elif len(values) == 1:
+            node = values[0]
+        elif len(values) == 2:
+            # reduce to string concatenation
+            node = ExprNodes.binop_node(node.pos, '+', *values)
+        else:
+            node.values = values
+        return node
 
     def visit_MergedDictNode(self, node):
         """Unpack **args in place if we can."""

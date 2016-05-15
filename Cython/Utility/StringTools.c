@@ -811,3 +811,52 @@ static CYTHON_INLINE int __Pyx_PyByteArray_Append(PyObject* bytearray, int value
     Py_DECREF(retval);
     return 0;
 }
+
+
+//////////////////// PyObjectFormatSimple.proto ////////////////////
+
+#if !CYTHON_COMPILING_IN_CPYTHON
+    #define __Pyx_PyObject_FormatSimple(s, f) ( \
+        likely(PyUnicode_CheckExact(s)) ? (Py_INCREF(s), s) : \
+        PyObject_Format(s, f))
+#elif PY_MAJOR_VERSION < 3
+    // str is common in Py2, but formatting must return a Unicode string
+    #define __Pyx_PyObject_FormatSimple(s, f) ( \
+        likely(PyUnicode_CheckExact(s)) ? (Py_INCREF(s), s) : \
+        likely(PyString_CheckExact(s)) ? PyUnicode_FromEncodedObject(s, NULL, "strict") : \
+        PyObject_Format(s, f))
+#else
+    // Py3 nicely returns unicode strings from str() which makes this quite efficient for builtin types
+    #define __Pyx_PyObject_FormatSimple(s, f) ( \
+        likely(PyUnicode_CheckExact(s)) ? (Py_INCREF(s), s) : \
+        likely(PyLong_CheckExact(s)) ? PyLong_Type.tp_str(s) : \
+        PyObject_Format(s, f))
+#endif
+
+
+//////////////////// PyObjectFormatAndDecref.proto ////////////////////
+
+static CYTHON_INLINE PyObject* __Pyx_PyObject_FormatSimpleAndDecref(PyObject* s, PyObject* f);
+static CYTHON_INLINE PyObject* __Pyx_PyObject_FormatAndDecref(PyObject* s, PyObject* f);
+
+//////////////////// PyObjectFormatAndDecref ////////////////////
+
+static CYTHON_INLINE PyObject* __Pyx_PyObject_FormatSimpleAndDecref(PyObject* s, PyObject* f) {
+    if (unlikely(!s)) return NULL;
+    if (likely(PyUnicode_CheckExact(s))) return s;
+    #if PY_MAJOR_VERSION < 3
+    // str is common in Py2, but formatting must return a Unicode string
+    if (likely(PyString_CheckExact(s))) {
+        PyObject *result = PyUnicode_FromEncodedObject(s, NULL, "strict");
+        Py_DECREF(s);
+        return result;
+    }
+    #endif
+    return __Pyx_PyObject_FormatAndDecref(s, f);
+}
+
+static CYTHON_INLINE PyObject* __Pyx_PyObject_FormatAndDecref(PyObject* s, PyObject* f) {
+    PyObject *result = PyObject_Format(s, f);
+    Py_DECREF(s);
+    return result;
+}

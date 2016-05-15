@@ -2956,6 +2956,150 @@ class RawCNameExprNode(ExprNode):
 
 #-------------------------------------------------------------------
 #
+#  F-strings
+#
+#-------------------------------------------------------------------
+
+
+class JoinedStrNode(ExprNode):
+    # F-strings
+    #
+    # values   [UnicodeNode|FormattedValueNode]   Substrings of the f-string
+    #
+    type = unicode_type
+    is_temp = True
+
+    subexprs = ['values']
+
+    def analyse_types(self, env):
+        self.values = [v.analyse_types(env).coerce_to_pyobject(env) for v in self.values]
+        return self
+
+    def may_be_none(self):
+        # PyUnicode_Join() always returns a Unicode string or raises an exception
+        return False
+
+    def generate_evaluation_code(self, code):
+        code.mark_pos(self.pos)
+        num_items = len(self.values)
+        list_var = code.funcstate.allocate_temp(py_object_type, manage_ref=True)
+
+        code.putln('%s = PyTuple_New(%s); %s' % (
+            list_var,
+            num_items,
+            code.error_goto_if_null(list_var, self.pos)))
+        code.put_gotref(list_var)
+
+        for i, node in enumerate(self.values):
+            node.generate_evaluation_code(code)
+            node.make_owned_reference(code)
+            code.put_giveref(node.py_result())
+            code.putln('PyTuple_SET_ITEM(%s, %s, %s);' % (list_var, i, node.py_result()))
+            node.generate_post_assignment_code(code)
+            node.free_temps(code)
+
+        code.mark_pos(self.pos)
+        self.allocate_temp_result(code)
+        code.putln('%s = PyUnicode_Join(%s, %s); %s' % (
+            self.result(),
+            Naming.empty_unicode,
+            list_var,
+            code.error_goto_if_null(self.py_result(), self.pos)))
+        code.put_gotref(self.py_result())
+        code.put_decref_clear(list_var, py_object_type)
+        code.funcstate.release_temp(list_var)
+
+
+class FormattedValueNode(ExprNode):
+    # {}-delimited portions of an f-string
+    #
+    # value           ExprNode                The expression itself
+    # conversion_char str or None             Type conversion (!s, !r, !a, or none)
+    # format_spec     JoinedStrNode or None   Format string passed to __format__
+    # c_format_spec   str or None             If not None, formatting can be done at the C level
+
+    subexprs = ['value', 'format_spec']
+
+    type = unicode_type
+    is_temp = True
+    c_format_spec = None
+
+    find_conversion_func = {
+        's': 'PyObject_Str',
+        'r': 'PyObject_Repr',
+        'a': 'PyObject_ASCII',  # NOTE: mapped to PyObject_Repr() in Py2
+    }.get
+
+    def may_be_none(self):
+        # PyObject_Format() always returns a Unicode string or raises an exception
+        return False
+
+    def analyse_types(self, env):
+        self.value = self.value.analyse_types(env)
+        if not self.format_spec or self.format_spec.is_string_literal:
+            c_format_spec = self.format_spec.value if self.format_spec else self.value.type.default_format_spec
+            if self.value.type.can_coerce_to_pystring(env, format_spec=c_format_spec):
+                self.c_format_spec = c_format_spec
+
+        if self.format_spec:
+            self.format_spec = self.format_spec.analyse_types(env).coerce_to_pyobject(env)
+        if self.c_format_spec is None:
+            self.value = self.value.coerce_to_pyobject(env)
+            if not self.format_spec and not self.conversion_char:
+                if self.value.type is unicode_type and not self.value.may_be_none():
+                    # value is definitely a unicode string and we don't format it any special
+                    return self.value
+        return self
+
+    def generate_result_code(self, code):
+        if self.c_format_spec is not None and not self.value.type.is_pyobject:
+            convert_func_call = self.value.type.convert_to_pystring(
+                self.value.result(), code, self.c_format_spec)
+            code.putln("%s = %s; %s" % (
+                self.result(),
+                convert_func_call,
+                code.error_goto_if_null(self.result(), self.pos)))
+            code.put_gotref(self.py_result())
+            return
+
+        value_result = self.value.py_result()
+        value_is_unicode = self.value.type is unicode_type and not self.value.may_be_none()
+        if self.format_spec:
+            format_func = '__Pyx_PyObject_Format'
+            format_spec = self.format_spec.py_result()
+        else:
+            # common case: expect simple Unicode pass-through if no format spec
+            format_func = '__Pyx_PyObject_FormatSimple'
+            # passing a Unicode format string in Py2 forces PyObject_Format() to also return a Unicode string
+            format_spec = Naming.empty_unicode
+
+        conversion_char = self.conversion_char
+        if conversion_char == 's' and value_is_unicode:
+            # no need to pipe unicode strings through str()
+            conversion_char = None
+
+        if conversion_char:
+            fn = self.find_conversion_func(conversion_char)
+            assert fn is not None, "invalid conversion character found: '%s'" % conversion_char
+            value_result = '%s(%s)' % (fn, value_result)
+            code.globalstate.use_utility_code(UtilityCode.load_cached("PyObjectFormatAndDecref", "StringTools.c"))
+            format_func += 'AndDecref'
+        elif not self.format_spec:
+            code.globalstate.use_utility_code(UtilityCode.load_cached("PyObjectFormatSimple", "StringTools.c"))
+        else:
+            format_func = 'PyObject_Format'
+
+        code.putln("%s = %s(%s, %s); %s" % (
+            self.result(),
+            format_func,
+            value_result,
+            format_spec,
+            code.error_goto_if_null(self.result(), self.pos)))
+        code.put_gotref(self.py_result())
+
+
+#-------------------------------------------------------------------
+#
 #  Parallel nodes (cython.parallel.thread(savailable|id))
 #
 #-------------------------------------------------------------------
@@ -10487,13 +10631,19 @@ class AddNode(NumBinopNode):
                 self, type1, type2)
 
     def py_operation_function(self, code):
-        type1, type2 = self.operand1.type, self.operand2.type
-        if type1 is unicode_type or type2 is unicode_type:
-            if type1.is_builtin_type and type2.is_builtin_type:
-                if self.operand1.may_be_none() or self.operand2.may_be_none():
-                    return '__Pyx_PyUnicode_ConcatSafe'
-                else:
-                    return '__Pyx_PyUnicode_Concat'
+        is_unicode_concat = False
+        if isinstance(self.operand1, FormattedValueNode) or isinstance(self.operand2, FormattedValueNode):
+            is_unicode_concat = True
+        else:
+            type1, type2 = self.operand1.type, self.operand2.type
+            if type1 is unicode_type or type2 is unicode_type:
+                is_unicode_concat = type1.is_builtin_type and type2.is_builtin_type
+
+        if is_unicode_concat:
+            if self.operand1.may_be_none() or self.operand2.may_be_none():
+                return '__Pyx_PyUnicode_ConcatSafe'
+            else:
+                return '__Pyx_PyUnicode_Concat'
         return super(AddNode, self).py_operation_function(code)
 
 
@@ -12317,7 +12467,7 @@ class CoerceToBooleanNode(CoercionNode):
         Builtin.set_type:        'PySet_GET_SIZE',
         Builtin.frozenset_type:  'PySet_GET_SIZE',
         Builtin.bytes_type:      'PyBytes_GET_SIZE',
-        Builtin.unicode_type:    'PyUnicode_GET_SIZE',
+        Builtin.unicode_type:    '__Pyx_PyUnicode_IS_TRUE',
     }
 
     def __init__(self, arg, env):

@@ -634,6 +634,8 @@ def create_dependency_tree(ctx=None, quiet=False):
 # This may be useful for advanced users?
 def create_extension_list(patterns, exclude=None, ctx=None, aliases=None, quiet=False, language=None,
                           exclude_failures=False):
+    if language is not None:
+        print('Please put "# distutils: language=%s" in your .pyx or .pxd file(s)' % language)
     if exclude is None:
         exclude = []
     if not isinstance(patterns, (list, tuple)):
@@ -652,10 +654,12 @@ def create_extension_list(patterns, exclude=None, ctx=None, aliases=None, quiet=
 
     # workaround for setuptools
     if 'setuptools' in sys.modules:
-       Extension_setuptools = sys.modules['setuptools'].Extension
+        Extension_distutils = sys.modules['setuptools.extension']._Extension
+        Extension_setuptools = sys.modules['setuptools'].Extension
     else:
-         # dummy class, in case we do not have setuptools
-         class Extension_setuptools(Extension): pass
+        # dummy class, in case we do not have setuptools
+        Extension_distutils = Extension
+        class Extension_setuptools(Extension): pass
 
     for pattern in patterns:
         if isinstance(pattern, str):
@@ -665,7 +669,7 @@ def create_extension_list(patterns, exclude=None, ctx=None, aliases=None, quiet=
             base = None
             exn_type = Extension
             ext_language = language
-        elif isinstance(pattern, (Extension, Extension_setuptools)):
+        elif isinstance(pattern, (Extension_distutils, Extension_setuptools)):
             for filepattern in pattern.sources:
                 if os.path.splitext(filepattern)[1] in ('.py', '.pyx'):
                     break
@@ -739,7 +743,7 @@ def create_extension_list(patterns, exclude=None, ctx=None, aliases=None, quiet=
                         **kwds))
                 if extra_sources:
                     kwds['sources'] = extra_sources
-                module_metadata[module_name] = {'distutils': kwds}
+                module_metadata[module_name] = {'distutils': kwds, 'module_name': module_name}
                 m = module_list[-1]
                 seen.add(name)
     return module_list, module_metadata
